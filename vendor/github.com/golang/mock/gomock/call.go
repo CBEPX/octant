@@ -50,19 +50,22 @@ func newCall(t TestHelper, receiver interface{}, method string, methodType refle
 	t.Helper()
 
 	// TODO: check arity, types.
-	margs := make([]Matcher, len(args))
+	mArgs := make([]Matcher, len(args))
 	for i, arg := range args {
 		if m, ok := arg.(Matcher); ok {
-			margs[i] = m
+			mArgs[i] = m
 		} else if arg == nil {
 			// Handle nil specially so that passing a nil interface value
 			// will match the typed nils of concrete args.
-			margs[i] = Nil()
+			mArgs[i] = Nil()
 		} else {
-			margs[i] = Eq(arg)
+			mArgs[i] = Eq(arg)
 		}
 	}
 
+	// callerInfo's skip should be updated if the number of calls between the user's test
+	// and this line changes, i.e. this code is wrapped in another anonymous function.
+	// 0 is us, 1 is RecordCallWithMethodType(), 2 is the generated recorder, and 3 is the user's test.
 	origin := callerInfo(3)
 	actions := []func([]interface{}) []interface{}{func([]interface{}) []interface{} {
 		// Synthesize the zero value for each of the return args' types.
@@ -73,7 +76,7 @@ func newCall(t TestHelper, receiver interface{}, method string, methodType refle
 		return rets
 	}}
 	return &Call{t: t, receiver: receiver, method: method, methodType: methodType,
-		args: margs, origin: origin, minCalls: 1, maxCalls: 1, actions: actions}
+		args: mArgs, origin: origin, minCalls: 1, maxCalls: 1, actions: actions}
 }
 
 // AnyTimes allows the expectation to be called 0 or more times
@@ -82,8 +85,8 @@ func (c *Call) AnyTimes() *Call {
 	return c
 }
 
-// MinTimes requires the call to occur at least n times. If AnyTimes or MaxTimes have not been called, MinTimes also
-// sets the maximum number of calls to infinity.
+// MinTimes requires the call to occur at least n times. If AnyTimes or MaxTimes have not been called or if MaxTimes
+// was previously called with 1, MinTimes also sets the maximum number of calls to infinity.
 func (c *Call) MinTimes(n int) *Call {
 	c.minCalls = n
 	if c.maxCalls == 1 {
@@ -92,8 +95,8 @@ func (c *Call) MinTimes(n int) *Call {
 	return c
 }
 
-// MaxTimes limits the number of calls to n times. If AnyTimes or MinTimes have not been called, MaxTimes also
-// sets the minimum number of calls to 0.
+// MaxTimes limits the number of calls to n times. If AnyTimes or MinTimes have not been called or if MinTimes was
+// previously called with 1, MaxTimes also sets the minimum number of calls to 0.
 func (c *Call) MaxTimes(n int) *Call {
 	c.maxCalls = n
 	if c.minCalls == 1 {
@@ -105,24 +108,36 @@ func (c *Call) MaxTimes(n int) *Call {
 // DoAndReturn declares the action to run when the call is matched.
 // The return values from this function are returned by the mocked function.
 // It takes an interface{} argument to support n-arity functions.
+// The anonymous function must match the function signature mocked method.
 func (c *Call) DoAndReturn(f interface{}) *Call {
 	// TODO: Check arity and types here, rather than dying badly elsewhere.
 	v := reflect.ValueOf(f)
 
 	c.addAction(func(args []interface{}) []interface{} {
-		vargs := make([]reflect.Value, len(args))
+		c.t.Helper()
 		ft := v.Type()
+		if c.methodType.NumIn() != ft.NumIn() {
+			if ft.IsVariadic() {
+				c.t.Fatalf("wrong number of arguments in DoAndReturn func for %T.%v The function signature must match the mocked method, a variadic function cannot be used.",
+					c.receiver, c.method)
+			} else {
+				c.t.Fatalf("wrong number of arguments in DoAndReturn func for %T.%v: got %d, want %d [%s]",
+					c.receiver, c.method, ft.NumIn(), c.methodType.NumIn(), c.origin)
+			}
+			return nil
+		}
+		vArgs := make([]reflect.Value, len(args))
 		for i := 0; i < len(args); i++ {
 			if args[i] != nil {
-				vargs[i] = reflect.ValueOf(args[i])
+				vArgs[i] = reflect.ValueOf(args[i])
 			} else {
 				// Use the zero value for the arg.
-				vargs[i] = reflect.Zero(ft.In(i))
+				vArgs[i] = reflect.Zero(ft.In(i))
 			}
 		}
-		vrets := v.Call(vargs)
-		rets := make([]interface{}, len(vrets))
-		for i, ret := range vrets {
+		vRets := v.Call(vArgs)
+		rets := make([]interface{}, len(vRets))
+		for i, ret := range vRets {
 			rets[i] = ret.Interface()
 		}
 		return rets
@@ -134,22 +149,34 @@ func (c *Call) DoAndReturn(f interface{}) *Call {
 // return values are ignored to retain backward compatibility. To use the
 // return values call DoAndReturn.
 // It takes an interface{} argument to support n-arity functions.
+// The anonymous function must match the function signature mocked method.
 func (c *Call) Do(f interface{}) *Call {
 	// TODO: Check arity and types here, rather than dying badly elsewhere.
 	v := reflect.ValueOf(f)
 
 	c.addAction(func(args []interface{}) []interface{} {
-		vargs := make([]reflect.Value, len(args))
+		c.t.Helper()
 		ft := v.Type()
+		if c.methodType.NumIn() != ft.NumIn() {
+			if ft.IsVariadic() {
+				c.t.Fatalf("wrong number of arguments in Do func for %T.%v The function signature must match the mocked method, a variadic function cannot be used.",
+					c.receiver, c.method)
+			} else {
+				c.t.Fatalf("wrong number of arguments in Do func for %T.%v: got %d, want %d [%s]",
+					c.receiver, c.method, ft.NumIn(), c.methodType.NumIn(), c.origin)
+			}
+			return nil
+		}
+		vArgs := make([]reflect.Value, len(args))
 		for i := 0; i < len(args); i++ {
 			if args[i] != nil {
-				vargs[i] = reflect.ValueOf(args[i])
+				vArgs[i] = reflect.ValueOf(args[i])
 			} else {
 				// Use the zero value for the arg.
-				vargs[i] = reflect.Zero(ft.In(i))
+				vArgs[i] = reflect.Zero(ft.In(i))
 			}
 		}
-		v.Call(vargs)
+		v.Call(vArgs)
 		return nil
 	})
 	return c
@@ -202,8 +229,8 @@ func (c *Call) Times(n int) *Call {
 }
 
 // SetArg declares an action that will set the nth argument's value,
-// indirected through a pointer. Or, in the case of a slice, SetArg
-// will copy value's elements into the nth argument.
+// indirected through a pointer. Or, in the case of a slice and map, SetArg
+// will copy value's elements/key-value pairs into the nth argument.
 func (c *Call) SetArg(n int, value interface{}) *Call {
 	c.t.Helper()
 
@@ -228,8 +255,10 @@ func (c *Call) SetArg(n int, value interface{}) *Call {
 		// nothing to do
 	case reflect.Slice:
 		// nothing to do
+	case reflect.Map:
+		// nothing to do
 	default:
-		c.t.Fatalf("SetArg(%d, ...) referring to argument of non-pointer non-interface non-slice type %v [%s]",
+		c.t.Fatalf("SetArg(%d, ...) referring to argument of non-pointer non-interface non-slice non-map type %v [%s]",
 			n, at, c.origin)
 	}
 
@@ -238,6 +267,8 @@ func (c *Call) SetArg(n int, value interface{}) *Call {
 		switch reflect.TypeOf(args[n]).Kind() {
 		case reflect.Slice:
 			setSlice(args[n], v)
+		case reflect.Map:
+			setMap(args[n], v)
 		default:
 			reflect.ValueOf(args[n]).Elem().Set(v)
 		}
@@ -276,7 +307,7 @@ func (c *Call) satisfied() bool {
 	return c.numCalls >= c.minCalls
 }
 
-// Returns true iff the maximum number of calls have been made.
+// Returns true if the maximum number of calls have been made.
 func (c *Call) exhausted() bool {
 	return c.numCalls >= c.maxCalls
 }
@@ -295,27 +326,29 @@ func (c *Call) String() string {
 func (c *Call) matches(args []interface{}) error {
 	if !c.methodType.IsVariadic() {
 		if len(args) != len(c.args) {
-			return fmt.Errorf("Expected call at %s has the wrong number of arguments. Got: %d, want: %d",
+			return fmt.Errorf("expected call at %s has the wrong number of arguments. Got: %d, want: %d",
 				c.origin, len(args), len(c.args))
 		}
 
 		for i, m := range c.args {
 			if !m.Matches(args[i]) {
-				return fmt.Errorf("Expected call at %s doesn't match the argument at index %s.\nGot: %v\nWant: %v",
-					c.origin, strconv.Itoa(i), args[i], m)
+				return fmt.Errorf(
+					"expected call at %s doesn't match the argument at index %d.\nGot: %v\nWant: %v",
+					c.origin, i, formatGottenArg(m, args[i]), m,
+				)
 			}
 		}
 	} else {
 		if len(c.args) < c.methodType.NumIn()-1 {
-			return fmt.Errorf("Expected call at %s has the wrong number of matchers. Got: %d, want: %d",
+			return fmt.Errorf("expected call at %s has the wrong number of matchers. Got: %d, want: %d",
 				c.origin, len(c.args), c.methodType.NumIn()-1)
 		}
 		if len(c.args) != c.methodType.NumIn() && len(args) != len(c.args) {
-			return fmt.Errorf("Expected call at %s has the wrong number of arguments. Got: %d, want: %d",
+			return fmt.Errorf("expected call at %s has the wrong number of arguments. Got: %d, want: %d",
 				c.origin, len(args), len(c.args))
 		}
 		if len(args) < len(c.args)-1 {
-			return fmt.Errorf("Expected call at %s has the wrong number of arguments. Got: %d, want: greater than or equal to %d",
+			return fmt.Errorf("expected call at %s has the wrong number of arguments. Got: %d, want: greater than or equal to %d",
 				c.origin, len(args), len(c.args)-1)
 		}
 
@@ -323,8 +356,8 @@ func (c *Call) matches(args []interface{}) error {
 			if i < c.methodType.NumIn()-1 {
 				// Non-variadic args
 				if !m.Matches(args[i]) {
-					return fmt.Errorf("Expected call at %s doesn't match the argument at index %s.\nGot: %v\nWant: %v",
-						c.origin, strconv.Itoa(i), args[i], m)
+					return fmt.Errorf("expected call at %s doesn't match the argument at index %s.\nGot: %v\nWant: %v",
+						c.origin, strconv.Itoa(i), formatGottenArg(m, args[i]), m)
 				}
 				continue
 			}
@@ -348,12 +381,12 @@ func (c *Call) matches(args []interface{}) error {
 			// matches all the remaining arguments or the lack of any.
 			// Convert the remaining arguments, if any, into a slice of the
 			// expected type.
-			vargsType := c.methodType.In(c.methodType.NumIn() - 1)
-			vargs := reflect.MakeSlice(vargsType, 0, len(args)-i)
+			vArgsType := c.methodType.In(c.methodType.NumIn() - 1)
+			vArgs := reflect.MakeSlice(vArgsType, 0, len(args)-i)
 			for _, arg := range args[i:] {
-				vargs = reflect.Append(vargs, reflect.ValueOf(arg))
+				vArgs = reflect.Append(vArgs, reflect.ValueOf(arg))
 			}
-			if m.Matches(vargs.Interface()) {
+			if m.Matches(vArgs.Interface()) {
 				// Got Foo(a, b, c, d, e) want Foo(matcherA, matcherB, gomock.Any())
 				// Got Foo(a, b, c, d, e) want Foo(matcherA, matcherB, someSliceMatcher)
 				// Got Foo(a, b) want Foo(matcherA, matcherB, gomock.Any())
@@ -366,23 +399,23 @@ func (c *Call) matches(args []interface{}) error {
 			// Got Foo(a, b, c, d) want Foo(matcherA, matcherB, matcherC, matcherD, matcherE)
 			// Got Foo(a, b, c, d, e) want Foo(matcherA, matcherB, matcherC, matcherD)
 			// Got Foo(a, b, c) want Foo(matcherA, matcherB)
-			return fmt.Errorf("Expected call at %s doesn't match the argument at index %s.\nGot: %v\nWant: %v",
-				c.origin, strconv.Itoa(i), args[i:], c.args[i])
 
+			return fmt.Errorf("expected call at %s doesn't match the argument at index %s.\nGot: %v\nWant: %v",
+				c.origin, strconv.Itoa(i), formatGottenArg(m, args[i:]), c.args[i])
 		}
 	}
 
 	// Check that all prerequisite calls have been satisfied.
 	for _, preReqCall := range c.preReqs {
 		if !preReqCall.satisfied() {
-			return fmt.Errorf("Expected call at %s doesn't have a prerequisite call satisfied:\n%v\nshould be called before:\n%v",
+			return fmt.Errorf("expected call at %s doesn't have a prerequisite call satisfied:\n%v\nshould be called before:\n%v",
 				c.origin, preReqCall, c)
 		}
 	}
 
 	// Check that the call is not exhausted.
 	if c.exhausted() {
-		return fmt.Errorf("Expected call at %s has already been called the max number of times.", c.origin)
+		return fmt.Errorf("expected call at %s has already been called the max number of times", c.origin)
 	}
 
 	return nil
@@ -396,7 +429,7 @@ func (c *Call) dropPrereqs() (preReqs []*Call) {
 	return
 }
 
-func (c *Call) call(args []interface{}) []func([]interface{}) []interface{} {
+func (c *Call) call() []func([]interface{}) []interface{} {
 	c.numCalls++
 	return c.actions
 }
@@ -415,6 +448,24 @@ func setSlice(arg interface{}, v reflect.Value) {
 	}
 }
 
+func setMap(arg interface{}, v reflect.Value) {
+	va := reflect.ValueOf(arg)
+	for _, e := range va.MapKeys() {
+		va.SetMapIndex(e, reflect.Value{})
+	}
+	for _, e := range v.MapKeys() {
+		va.SetMapIndex(e, v.MapIndex(e))
+	}
+}
+
 func (c *Call) addAction(action func([]interface{}) []interface{}) {
 	c.actions = append(c.actions, action)
+}
+
+func formatGottenArg(m Matcher, arg interface{}) string {
+	got := fmt.Sprintf("%v (%T)", arg, arg)
+	if gs, ok := m.(GotFormatter); ok {
+		got = gs.Got(arg)
+	}
+	return got
 }

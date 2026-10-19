@@ -29,12 +29,14 @@ const pkgPath = "github.com/golang/mock/mockgen/model"
 // Package is a Go package. It may be a subset.
 type Package struct {
 	Name       string
+	PkgPath    string
 	Interfaces []*Interface
 	DotImports []string
 }
 
+// Print writes the package name and its exported interfaces.
 func (pkg *Package) Print(w io.Writer) {
-	fmt.Fprintf(w, "package %s\n", pkg.Name)
+	_, _ = fmt.Fprintf(w, "package %s\n", pkg.Name)
 	for _, intf := range pkg.Interfaces {
 		intf.Print(w)
 	}
@@ -45,18 +47,23 @@ func (pkg *Package) Imports() map[string]bool {
 	im := make(map[string]bool)
 	for _, intf := range pkg.Interfaces {
 		intf.addImports(im)
+		for _, tp := range intf.TypeParams {
+			tp.Type.addImports(im)
+		}
 	}
 	return im
 }
 
 // Interface is a Go interface.
 type Interface struct {
-	Name    string
-	Methods []*Method
+	Name       string
+	Methods    []*Method
+	TypeParams []*Parameter
 }
 
+// Print writes the interface name and its methods.
 func (intf *Interface) Print(w io.Writer) {
-	fmt.Fprintf(w, "interface %s\n", intf.Name)
+	_, _ = fmt.Fprintf(w, "interface %s\n", intf.Name)
 	for _, m := range intf.Methods {
 		m.Print(w)
 	}
@@ -68,6 +75,16 @@ func (intf *Interface) addImports(im map[string]bool) {
 	}
 }
 
+// AddMethod adds a new method, de-duplicating by method name.
+func (intf *Interface) AddMethod(m *Method) {
+	for _, me := range intf.Methods {
+		if me.Name == m.Name {
+			return
+		}
+	}
+	intf.Methods = append(intf.Methods, m)
+}
+
 // Method is a single method of an interface.
 type Method struct {
 	Name     string
@@ -75,20 +92,21 @@ type Method struct {
 	Variadic *Parameter // may be nil
 }
 
+// Print writes the method name and its signature.
 func (m *Method) Print(w io.Writer) {
-	fmt.Fprintf(w, "  - method %s\n", m.Name)
+	_, _ = fmt.Fprintf(w, "  - method %s\n", m.Name)
 	if len(m.In) > 0 {
-		fmt.Fprintf(w, "    in:\n")
+		_, _ = fmt.Fprintf(w, "    in:\n")
 		for _, p := range m.In {
 			p.Print(w)
 		}
 	}
 	if m.Variadic != nil {
-		fmt.Fprintf(w, "    ...:\n")
+		_, _ = fmt.Fprintf(w, "    ...:\n")
 		m.Variadic.Print(w)
 	}
 	if len(m.Out) > 0 {
-		fmt.Fprintf(w, "    out:\n")
+		_, _ = fmt.Fprintf(w, "    out:\n")
 		for _, p := range m.Out {
 			p.Print(w)
 		}
@@ -113,12 +131,13 @@ type Parameter struct {
 	Type Type
 }
 
+// Print writes a method parameter.
 func (p *Parameter) Print(w io.Writer) {
 	n := p.Name
 	if n == "" {
 		n = `""`
 	}
-	fmt.Fprintf(w, "    - %v: %v\n", n, p.Type.String(nil, ""))
+	_, _ = fmt.Fprintf(w, "    - %v: %v\n", n, p.Type.String(nil, ""))
 }
 
 // Type is a Go type.
@@ -183,6 +202,7 @@ func (ct *ChanType) addImports(im map[string]bool) { ct.Type.addImports(im) }
 // ChanDir is a channel direction.
 type ChanDir int
 
+// Constants for channel directions.
 const (
 	RecvDir ChanDir = 1
 	SendDir ChanDir = 2
@@ -243,26 +263,28 @@ func (mt *MapType) addImports(im map[string]bool) {
 
 // NamedType is an exported type in a package.
 type NamedType struct {
-	Package string // may be empty
-	Type    string // TODO: should this be typed Type?
+	Package    string // may be empty
+	Type       string
+	TypeParams *TypeParametersType
 }
 
 func (nt *NamedType) String(pm map[string]string, pkgOverride string) string {
-	// TODO: is this right?
 	if pkgOverride == nt.Package {
-		return nt.Type
+		return nt.Type + nt.TypeParams.String(pm, pkgOverride)
 	}
 	prefix := pm[nt.Package]
 	if prefix != "" {
-		return prefix + "." + nt.Type
-	} else {
-		return nt.Type
+		return prefix + "." + nt.Type + nt.TypeParams.String(pm, pkgOverride)
 	}
+
+	return nt.Type + nt.TypeParams.String(pm, pkgOverride)
 }
+
 func (nt *NamedType) addImports(im map[string]bool) {
 	if nt.Package != "" {
 		im[nt.Package] = true
 	}
+	nt.TypeParams.addImports(im)
 }
 
 // PointerType is a pointer to another type.
@@ -278,11 +300,43 @@ func (pt *PointerType) addImports(im map[string]bool) { pt.Type.addImports(im) }
 // PredeclaredType is a predeclared type such as "int".
 type PredeclaredType string
 
-func (pt PredeclaredType) String(pm map[string]string, pkgOverride string) string { return string(pt) }
-func (pt PredeclaredType) addImports(im map[string]bool)                          {}
+func (pt PredeclaredType) String(map[string]string, string) string { return string(pt) }
+func (pt PredeclaredType) addImports(map[string]bool)              {}
+
+// TypeParametersType contains type paramters for a NamedType.
+type TypeParametersType struct {
+	TypeParameters []Type
+}
+
+func (tp *TypeParametersType) String(pm map[string]string, pkgOverride string) string {
+	if tp == nil || len(tp.TypeParameters) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i, v := range tp.TypeParameters {
+		if i != 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(v.String(pm, pkgOverride))
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+func (tp *TypeParametersType) addImports(im map[string]bool) {
+	if tp == nil {
+		return
+	}
+	for _, v := range tp.TypeParameters {
+		v.addImports(im)
+	}
+}
 
 // The following code is intended to be called by the program generated by ../reflect.go.
 
+// InterfaceFromInterfaceType returns a pointer to an interface for the
+// given reflection interface type.
 func InterfaceFromInterfaceType(it reflect.Type) (*Interface, error) {
 	if it.Kind() != reflect.Interface {
 		return nil, fmt.Errorf("%v is not an interface", it)
@@ -302,7 +356,7 @@ func InterfaceFromInterfaceType(it reflect.Type) (*Interface, error) {
 			return nil, err
 		}
 
-		intf.Methods = append(intf.Methods, m)
+		intf.AddMethod(m)
 	}
 
 	return intf, nil
@@ -458,4 +512,20 @@ func impPath(imp string) string {
 		imp = imp[i+len("/vendor/"):]
 	}
 	return imp
+}
+
+// ErrorInterface represent built-in error interface.
+var ErrorInterface = Interface{
+	Name: "error",
+	Methods: []*Method{
+		{
+			Name: "Error",
+			Out: []*Parameter{
+				{
+					Name: "",
+					Type: PredeclaredType("string"),
+				},
+			},
+		},
+	},
 }
